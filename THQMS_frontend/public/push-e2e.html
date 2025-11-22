@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>THQMS 前端 · 端到端推送与通知实现说明</title>
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { margin:0; padding:0; font: 14px/1.6 system-ui, -apple-system, Segoe UI, Roboto, 'PingFang SC', 'Microsoft Yahei', sans-serif; }
+    header { position: sticky; top:0; z-index:10; background: canvas; border-bottom: 1px solid rgba(0,0,0,.08); padding: 10px 16px; }
+    main { padding: 16px; max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 6px 0 0; }
+    h2 { margin-top: 28px; font-size: 18px; }
+    h3 { margin-top: 16px; font-size: 15px; }
+    .grid { display: grid; gap: 16px; }
+    .muted { color: #667085; }
+    .card { border: 1px solid rgba(0,0,0,.08); border-radius: 10px; padding: 12px; background: canvas; }
+    pre { background: #0b1020; color: #e6edf3; padding: 10px; border-radius: 8px; overflow: auto; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .toc a { margin-right: 14px; text-decoration: none; color: #3b82f6; }
+    .tag { padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #e5f2ff; color: #0c5bd8; }
+    .warn { background: #fff7ed; color: #9a3412; border-color: #fed7aa; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script> mermaid.initialize({ startOnLoad: true, theme: (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default') }); </script>
+</head>
+<body>
+  <header>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <strong>THQMS 前端 · 推送/通知 E2E 实现说明</strong>
+  <span class="tag">浏览器通知 + HTTPS 开发</span>
+    </div>
+    <nav class="toc" style="margin-top:6px;">
+      <a href="#overview">概览</a>
+      <a href="#arch">架构/流转图</a>
+      <a href="#seq">时序/序列图</a>
+      <a href="#flow">流程/判定图</a>
+  <a href="#gantt">甘特图</a>
+  <a href="#table">表格</a>
+      <a href="#howto">如何运行与验证</a>
+      <a href="#files">代码与文件索引</a>
+      <a href="#troubleshoot">排错提示</a>
+    </nav>
+  </header>
+  <main>
+    <section id="overview" class="grid">
+      <h1>概览</h1>
+  <p>本文档介绍 THQMS 前端通知的实现：包含浏览器 Notification 与 HTTPS 开发环境配置，便于在手机的局域网环境下进行测试验证。</p>
+      <div class="card">
+        <h3>目标</h3>
+        <ul>
+          <li>应用内：顶部通知栏（TopNotiStack）+ 响铃（AnomalyBoard）</li>
+          <li>浏览器通知：前台 onMessage 展示；后台通过 Service Worker 显示系统通知</li>
+          <li>点击通知：路由跳转到例如 <code>/lab?param=xxx</code> 并滚动/高亮对应图表</li>
+          <li>HTTPS 本地开发（自签名证书）+ 局域网访问，用于手机端真实测试</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="arch" class="grid">
+      <h2>架构 / 流转图</h2>
+      <div class="card">
+        <div class="mermaid">
+          flowchart LR
+            subgraph Client[浏览器/手机]
+              App[Vue 应用\n(main.ts)]
+              Noti[顶栏通知/响铃\nTopNotiStack / AnomalyBoard]
+              SW[Service Worker]
+            end
+            Backend[(可选: 后端服务)]
+
+            App -->|请求权限| Noti
+            Noti -->|系统通知| Client
+            Noti -->|点击跳转| App
+            App -->|可选: 轮询/SSE/WebSocket| Backend
+        </div>
+      </div>
+    </section>
+
+    <section id="seq" class="grid">
+      <h2>时序/序列图</h2>
+
+      <h3>1) 初始化与 Token 获取</h3>
+      <div class="card">
+        <div class="mermaid">
+sequenceDiagram
+  participant U as 用户
+  participant App as Vue 应用(main.ts)
+  participant SW as Service Worker (可选用于缓存)
+  participant Noti as 顶栏通知
+
+  U->>App: 打开页面
+  App->>SW: 注册 Service Worker
+  App->>Noti: 请求系统通知权限（https/localhost）
+  Noti-->>App: granted/denied
+        </div>
+      </div>
+
+      <h3>2) 前台消息</h3>
+      <div class="card">
+        <div class="mermaid">
+sequenceDiagram
+  participant Noti as 浏览器通知
+  participant App as Vue 应用
+  participant Noti as 顶栏通知
+  participant Router as Vue Router
+
+  App->>Noti: ns.push(title, body, targetRoute=/lab?param=xxx)
+  Noti->>Router: 用户点击“查看”跳转
+  Router-->>App: 导航到 /lab?param=xxx
+  App->>App: 定位并高亮对应图表
+        </div>
+      </div>
+
+      <h3>3) 后台消息（SW）</h3>
+      <div class="card">
+        <div class="mermaid">
+sequenceDiagram
+  participant Noti as 浏览器通知
+  participant Router as Vue Router
+  App-->>Noti: new Notification(title, body)
+  Noti-->>Router: 用户点击通知
+  Router-->>App: 进入 /lab?param=xxx 并高亮
+        </div>
+      </div>
+    </section>
+
+    <section id="flow" class="grid">
+      <h2>流程/判定图</h2>
+
+      <h3>系统通知支持判定（getNotificationSupportInfo）</h3>
+      <div class="card">
+        <div class="mermaid">
+flowchart TD
+  A[检查 Notification API 是否存在] -->|否| X[不可用: 浏览器不支持]
+  A -->|是| B{是否安全上下文?\nhttps / localhost}
+  B -->|否| Y[不可用: 非安全上下文\n需 https 或 localhost]
+  B -->|是| C{iOS 且非 PWA 独立模式?}
+  C -->|是| Z[不可用: iOS 需添加到主屏幕(PWA)]
+  C -->|否| D{Permission == denied?}
+  D -->|是| W[不可用: 已拒绝\n需在设置中开启]
+  D -->|否| E[可用: 可请求权限/接收通知]
+        </div>
+      </div>
+
+      <h3>HTTPS 开发证书加载（vite.config.ts）</h3>
+      <div class="card">
+        <div class="mermaid">
+flowchart LR
+  S[启动 Dev Server] --> J{VITE_DEV_HTTPS=1?}
+  J -->|否| P[http://, SW/推送受限]
+  J -->|是| K{存在 PFX? VITE_DEV_PFX}
+  K -->|是| H1[读取 PFX + Passphrase]
+  K -->|否| K2{存在 PEM? VITE_DEV_CERT/VITE_DEV_KEY 或 cert/ 默认}
+  K2 -->|是| H2[读取 cert/key]
+  K2 -->|否| H3[https: {} (空配置)]
+  H1 --> Q[以 https:5173 监听]
+  H2 --> Q
+  H3 --> Q
+        </div>
+      </div>
+    </section>
+
+    <section id="gantt" class="grid">
+      <h2>甘特图（阶段/任务）</h2>
+      <div class="card">
+        <div class="mermaid">
+gantt
+  title 通知/推送端到端集成
+  dateFormat  YYYY-MM-DD
+  section 基础
+    顶部通知/响铃(已完成)      :done,    t1, 2025-08-01, 3d
+    路由定位与高亮(已完成)      :done,    t2, 2025-08-04, 2d
+  section 推送集成
+    浏览器通知骨架(已完成)       :done,    t3, 2025-08-06, 2d
+    SW 缓存/离线(可选)           :         t4, 2025-08-08, 1d
+    HTTPS 本地开发(进行中)      :active,  t5, 2025-08-09, 2d
+  section 后端与运维
+    Token 上报/存储(可选)       :         t6, 2025-08-11, 2d
+    推送发送接口(可选)          :         t7, 2025-08-13, 2d
+        </div>
+      </div>
+    </section>
+
+    <section id="table" class="grid">
+      <h2>表格</h2>
+      <div class="card">
+        <p class="muted">说明：Mermaid 目前没有“原生表格”图表类型，本节提供一个标准 HTML 表格作为信息总览，并附带一个 ER 图用于结构化展示，起到接近“表格”的辅助效果。</p>
+        <h3>消息负载字段示例（HTML 表）</h3>
+        <div style="overflow:auto">
+          <table style="border-collapse:collapse; width:100%; min-width:720px;">
+            <thead>
+              <tr>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">字段</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">类型</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">示例</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">notification.title</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">string</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">“实验室异常告警”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">通知标题（系统通知/前台通知均可显示）</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">notification.body</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">string</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">“参数 pH 超上限”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">通知正文</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">data.url</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">string</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">“/lab?param=ph”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">点击通知后的目标路由，用于滚动/高亮</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">data.severity</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">"low" | "medium" | "high"</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">“high”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">用于样式/声音策略（可选）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>结构化字段视图（Mermaid ER 图）</h3>
+        <div class="mermaid">
+erDiagram
+  MessagePayload ||--o{ Notification : contains
+  MessagePayload ||--o{ Data : carries
+  Notification {
+    string title
+    string body
+    string icon
+  }
+  Data {
+    string url
+    string severity
+    string paramId
+  }
+  MessagePayload {
+    Notification notification
+    Data data
+  }
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>任务完成清单（HTML 表）</h3>
+        <div style="overflow:auto">
+          <table style="border-collapse:collapse; width:100%; min-width:800px;">
+            <thead>
+              <tr>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">任务</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">状态</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">责任</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">备注</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">顶部通知/响铃（TopNotiStack / AnomalyBoard）</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">已完成</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">前端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">支持开关与冷却、无障碍 aria-live</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">路由定位与高亮（/lab?param=xxx）</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">已完成</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">前端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">滚动定位 + 动画高亮</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">浏览器通知权限/消息</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">已完成</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">前端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">顶栏通知展示、携带目标路由</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">SW 后台消息（onBackgroundMessage + 点击跳转）</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">已完成</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">前端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">系统通知 → 点击打开/聚焦并导航</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">HTTPS 本地开发（自签/加载证书）</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">进行中</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">前端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">Vite 支持 PFX/PEM；需在设备信任证书</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">Token 上报/存储（后端）</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">计划中</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">后端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">用于服务端主动推送</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">后端触发（轮询/SSE/WebSocket）</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">计划中</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">后端</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">含目标路由 data.url</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>字段对照 / 数据模型扩展（HTML 表）</h3>
+        <div style="overflow:auto">
+          <table style="border-collapse:collapse; width:100%; min-width:880px;">
+            <thead>
+              <tr>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">模块</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">字段</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">类型/示例</th>
+                <th style="border:1px solid #e5e7eb; padding:6px 8px; text-align:left;">说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">Notification</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">title/body/icon</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">字符串 / “实验室异常告警”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">系统通知/前台通知展示基础</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">data</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">url</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">“/lab?param=ph”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">点击后路由，驱动滚动/高亮</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">FCM.data</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">severity</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">low/medium/high</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">控制样式/声音（可选）</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">App 通知项</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">id/title/body/severity/ts</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">结构化对象</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">统一顶栏显示与自动消隐</td>
+              </tr>
+              <tr>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">App 跳转</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">targetRoute/targetParamId</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">“/lab” / “ph”</td>
+                <td style="border:1px solid #e5e7eb; padding:6px 8px;">支持一键“查看”到目标处</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="howto" class="grid">
+      <h2>如何运行与验证</h2>
+      <div class="card">
+        <h3>环境与前置</h3>
+        <ul>
+          <li>HTTPS 或 localhost 环境（移动端系统通知需要）</li>
+          <li>可选：<code>VITE_DEV_HTTPS=1</code> 并提供 PFX 或 PEM 证书路径</li>
+        </ul>
+        <h3>步骤</h3>
+        <ol>
+          <li>PC 打开 https://localhost:5173（或 https://你的局域网IP:5173）</li>
+          <li>允许浏览器通知权限；在页面中触发“异常”可观察通知与响铃</li>
+          <li>点击通知后跳转到 <code>/lab?param=xxx</code>，对应图表滚动并高亮</li>
+        </ol>
+        <p class="card warn">iOS 设备：若要使用推送/系统通知，请将站点“添加到主屏幕”后从图标进入（PWA 独立模式）；并确保使用 https。</p>
+      </div>
+    </section>
+
+    <section id="files" class="grid">
+      <h2>代码与文件索引</h2>
+      <div class="card">
+        <ul>
+          <li><code>src/services/notify.ts</code>：系统通知支持判定与权限请求（含 iOS/安全上下文提示）</li>
+          <li><code>src/services/notify.ts</code>：系统通知支持判定与权限请求（含 iOS/安全上下文提示）</li>
+          <li><code>src/components/TopNotiStack.vue</code>：顶栏通知与“系统通知”开关逻辑（细分不可用原因）</li>
+          <li><code>src/views/LabDashboard.vue</code>：根据 <code>?param=xxx</code> 滚动并高亮指定图表</li>
+          <li><code>vite.config.ts</code>：HTTPS dev server 支持（PFX / PEM / 空 https 配置）</li>
+          <li><code>.env.example</code>：Firebase 与 HTTPS 开关/证书路径样例</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="troubleshoot" class="grid">
+      <h2>排错提示</h2>
+      <div class="card">
+        <ul>
+          <li>系统通知按钮显示“不支持”：多数是非安全上下文（http）或 iOS 非 PWA 模式；请改为 https 或添加到主屏幕</li>
+          <li>通知权限被拒：在浏览器站点设置中重新允许通知</li>
+          <li>后台通知不弹：确认浏览器未被系统限权；检查 SW 是否注册成功，开发者工具 Application → Service Workers</li>
+          <li>点击通知未跳转：确保推送 <code>data.url</code> 正确（如 <code>/lab?param=xxx</code>），SW 中 <code>notificationclick</code> 逻辑会 openWindow 或 focus</li>
+          <li>局域网手机访问证书不信任：将自签根证书导入设备并信任；或使用可信代理/隧道</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
